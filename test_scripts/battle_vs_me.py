@@ -1,22 +1,12 @@
-"""
-Human vs Bot battle script.
-
-The bot (RandomPlayer) will challenge YOU on the local Showdown server.
-
-Steps:
-  1. Make sure the server is running:
-         node pokemon-showdown start --no-security
-  2. Open http://localhost:8000 in your browser and pick a username.
-  3. Run this script and pass your username as an argument:
-         python battle_vs_me.py <your-username>
-  4. Accept the challenge in your browser and play!
-"""
-
 import asyncio
 import sys
 import uuid
 from poke_env import AccountConfiguration
 from poke_env.player import RandomPlayer
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 async def main(human_username: str):
@@ -47,10 +37,5 @@ async def main(human_username: str):
 
 
 if __name__ == "__main__":
-    # if len(sys.argv) < 2:
-    #     print("Usage: python battle_vs_me.py <your-showdown-username>")
-    #     print("Example: python battle_vs_me.py player")
-    #     sys.exit(1)
-
-    human = 'arjungravi007'
+    human = os.getenv('trainer_name')
     asyncio.run(main(human))
