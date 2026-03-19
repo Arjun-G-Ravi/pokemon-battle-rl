@@ -47,10 +47,10 @@ async def main(human_username: str):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python battle_vs_me.py <your-showdown-username>")
-        print("Example: python battle_vs_me.py player")
-        sys.exit(1)
+    # if len(sys.argv) < 2:
+    #     print("Usage: python battle_vs_me.py <your-showdown-username>")
+    #     print("Example: python battle_vs_me.py player")
+    #     sys.exit(1)
 
-    human = sys.argv[1]
+    human = 'arjungravi007'
     asyncio.run(main(human))
