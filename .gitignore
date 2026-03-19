@@ -1,3 +1,5 @@
 .agent/
 pokemon-showdown/
 .env
+.venv
+__pycache__/
