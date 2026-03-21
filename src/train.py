@@ -25,6 +25,51 @@ from poke_env.player import Player, RandomPlayer
 
 sys.path.insert(0, os.path.dirname(__file__))
 from model1 import Model1, build_obs, _build_action_mask, action_idx_to_choice
+from random_model import RandomModel
+from strongest_move_model import StrongestMoveModel
+from model2 import Model2
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Opponent model → poke-env Player wrapper
+# ──────────────────────────────────────────────────────────────────────────────
+
+class OpponentPlayer(Player):
+    """Wraps any model with a .predict(battle) interface into a poke-env Player."""
+
+    def __init__(self, model, **kwargs):
+        super().__init__(**kwargs)
+        self.model = model
+
+    def choose_move(self, battle):
+        choice = self.model.predict(battle)
+        if choice is not None:
+            return self.create_order(choice)
+        return self.choose_random_move(battle)
+
+
+def _make_opponent(name: str, battle_format: str) -> Player:
+    """Instantiate the correct opponent Player from the config string."""
+    name = name.strip().lower()
+    if name == "random":
+        model = RandomModel()
+        label = "RandomModel"
+    elif name == "strongest_move":
+        model = StrongestMoveModel()
+        label = "StrongestMoveModel"
+    elif name == "model2":
+        model = Model2()
+        label = "Model2 (pretrained PPO)"
+    else:
+        raise ValueError(
+            f"Unknown OPPONENT '{name}'. "
+            "Choose one of: 'random', 'strongest_move', 'model2'"
+        )
+    print(f"[Opponent] Using {label}")
+    return OpponentPlayer(
+        model=model,
+        account_configuration=AccountConfiguration("Opp_Player", None),
+        battle_format=battle_format,
+    )
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Reward shaping
@@ -98,6 +143,7 @@ async def train(
     lr: float          = 3e-4,
     gamma: float       = 0.99,
     battle_format: str = "gen1randombattle",
+    opponent: str      = "random",
 ):
     model = Model1(lr=lr, gamma=gamma)
 
@@ -109,10 +155,7 @@ async def train(
         account_configuration=AccountConfiguration("PPO_Trainer", None),
         battle_format=battle_format,
     )
-    rand_player = RandomPlayer(
-        account_configuration=AccountConfiguration("Rand_Opponent", None),
-        battle_format=battle_format,
-    )
+    opp_player = _make_opponent(opponent, battle_format)
 
     print(f"\n{'='*60}")
     print(f"  PPO Training  |  {n_battles} battles  |  update every {update_every}")
@@ -138,7 +181,7 @@ async def train(
         # ── Run a full batch of battles in one shot ──────────────────────────
         # battle_against issues challenges and waits for ALL of them to finish
         # before returning – no challenge-overlap issues.
-        await ppo_player.battle_against(rand_player, n_battles=batch_size)
+        await ppo_player.battle_against(opp_player, n_battles=batch_size)
 
         # ── Collect terminal rewards for every battle in this batch ──────────
         for battle in ppo_player.battles.values():
@@ -265,7 +308,8 @@ if __name__ == "__main__":
 
     print(f"Config loaded from: {os.path.normpath(_config_path)}")
     print(f"  battles={cfg.N_BATTLES}  update_every={cfg.UPDATE_EVERY}  "
-          f"lr={cfg.LR}  gamma={cfg.GAMMA}  format={cfg.BATTLE_FORMAT}\n")
+          f"lr={cfg.LR}  gamma={cfg.GAMMA}  format={cfg.BATTLE_FORMAT}  "
+          f"opponent={cfg.OPPONENT}\n")
 
     asyncio.run(train(
         n_battles=cfg.N_BATTLES,
@@ -273,4 +317,5 @@ if __name__ == "__main__":
         lr=cfg.LR,
         gamma=cfg.GAMMA,
         battle_format=cfg.BATTLE_FORMAT,
+        opponent=cfg.OPPONENT,
     ))
