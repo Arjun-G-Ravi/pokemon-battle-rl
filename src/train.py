@@ -396,7 +396,8 @@ def plot_training(history: dict, checkpoint_path: str) -> None:
 
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     out_dir  = os.path.dirname(checkpoint_path)
-    plot_path = os.path.join(out_dir, f"training_plot_{timestamp}.png")
+    model_name = os.path.splitext(os.path.basename(checkpoint_path))[0]
+    plot_path = os.path.join(out_dir, f"training_plot_{model_name}_{timestamp}.png")
     os.makedirs(out_dir, exist_ok=True)
     plt.savefig(plot_path, dpi=150, bbox_inches="tight",
                 facecolor=fig.get_facecolor())
