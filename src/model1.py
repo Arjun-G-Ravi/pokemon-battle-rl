@@ -7,12 +7,18 @@ class Model1:
 
     def predict(self, battle):
 
-        self._print_state(battle)
+        # self._print_state(battle)
 
         choices = battle.available_moves + battle.available_switches
         if not choices:
             return None
         return random.choice(choices)
+    
+    def train_rl(self):
+        pass
+
+    def predict_rl(self):
+        pass
 
 
 
