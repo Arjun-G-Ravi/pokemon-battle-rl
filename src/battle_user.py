@@ -1,7 +1,20 @@
-'''
-This script allows a user to play a battle against a model.
-The model is selected here and used to drive the bot's decisions.
-'''
+"""
+battle_user.py  –  Challenge the trained PPO bot
+
+Loads the latest Model1 checkpoint and lets the local trainer account
+challenge it for one battle.
+
+Usage:
+    source pokemon_env/bin/activate.fish
+    python src/battle_user.py
+
+The .env file must contain:
+    trainer_name=<your Showdown username>
+
+Make sure the Pokemon Showdown server is running:
+    node pokemon-showdown start --no-security
+"""
+
 import asyncio
 import os
 import sys
@@ -10,46 +23,66 @@ from poke_env import AccountConfiguration
 from poke_env.player import Player
 from dotenv import load_dotenv
 
-# ── Choose your model here ────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(__file__))
-from model1 import Model1
-from model2 import Model2
+from model1 import Model1, action_idx_to_choice
 
-MODEL = Model1()   # swap to Model2() to use the first-move model
-# ─────────────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+#  Load trained model
+# ──────────────────────────────────────────────────────────────────────────────
 
-load_dotenv()
-trainer_name = os.getenv('trainer_name')
+MODEL = Model1()
 
+if os.path.exists(MODEL.CHECKPOINT):
+    MODEL.load()
+    print(f"✓ Loaded checkpoint from {MODEL.CHECKPOINT}")
+else:
+    print(f"⚠  No checkpoint found at {MODEL.CHECKPOINT}")
+    print(f"   Tip: run  python src/train.py  first to train the model.")
+    print(f"   The bot will use its untrained (random-ish) policy.\n")
 
-class ModelPlayer(Player):
-    """A poke-env Player that delegates move choice to a Model instance."""
+# ──────────────────────────────────────────────────────────────────────────────
+#  Player wrapper
+# ──────────────────────────────────────────────────────────────────────────────
 
-    def __init__(self, model, **kwargs):
+class PPOBotPlayer(Player):
+    """poke-env Player that uses the trained PPO policy (no exploration / no buffer writes)."""
+
+    def __init__(self, model: Model1, **kwargs):
         super().__init__(**kwargs)
         self.model = model
 
     def choose_move(self, battle):
-        choice = self.model.predict(battle)
+        # predict_rl with store=False  →  pure inference, no rollout saved
+        choice = self.model.predict_rl(battle, store=False)
         if choice is not None:
             return self.create_order(choice)
-        # fallback: let poke-env pick (should rarely happen)
         return self.choose_random_move(battle)
 
 
-bot_account = AccountConfiguration("ModelBot", None)
-bot = ModelPlayer(
+# ──────────────────────────────────────────────────────────────────────────────
+#  Main
+# ──────────────────────────────────────────────────────────────────────────────
+
+load_dotenv()
+trainer_name = os.getenv("trainer_name")
+if not trainer_name:
+    raise SystemExit(
+        "ERROR: 'trainer_name' not set in .env\n"
+        "Create a .env file in the project root with:\n"
+        "    trainer_name=YourShowdownUsername"
+    )
+
+bot_account = AccountConfiguration("PPO_Bot", None)
+bot = PPOBotPlayer(
     model=MODEL,
     account_configuration=bot_account,
     battle_format="gen1randombattle",
 )
 
-print(f"Challenging {trainer_name} with {type(MODEL).__name__}....")
+print(f"Challenging {trainer_name} …  (format: gen1randombattle)\n")
 asyncio.run(bot.send_challenges(trainer_name, n_challenges=1))
 
 print("\nBattle finished!")
 for tag, battle in bot.battles.items():
-    if battle.won:
-        print("Bot won the match")
-    else:
-        print(f"{trainer_name} won the match")
+    winner = "PPO Bot" if battle.won else trainer_name
+    print(f"  {tag}  →  {winner} won")

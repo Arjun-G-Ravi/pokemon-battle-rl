@@ -1,2 +1,5 @@
 poke-env
 python-dotenv
+torch
+numpy
+matplotlib

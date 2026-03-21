@@ -1,0 +1,276 @@
+"""
+train.py  –  PPO training loop for Model1
+
+Edit train_config.py (in the project root) to change hyperparameters,
+then run:
+
+    source pokemon_env/bin/activate.fish
+    python src/train.py
+
+Make sure the Pokemon Showdown server is running first:
+    node pokemon-showdown start --no-security
+"""
+
+import asyncio
+import os
+import sys
+
+import matplotlib
+matplotlib.use("Agg")   # headless – no display needed
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+
+from poke_env import AccountConfiguration
+from poke_env.player import Player, RandomPlayer
+
+sys.path.insert(0, os.path.dirname(__file__))
+from model1 import Model1, build_obs, _build_action_mask, action_idx_to_choice
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Reward shaping
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _battle_reward(battle) -> float:
+    """Bonus reward based on HP difference at end of battle, range [-1, 1]."""
+    my_hp  = sum(p.current_hp_fraction for p in battle.team.values())
+    opp_hp = sum(p.current_hp_fraction for p in battle.opponent_team.values())
+    return (my_hp - opp_hp) / 6.0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  PPO Player
+# ──────────────────────────────────────────────────────────────────────────────
+
+class PPOPlayer(Player):
+    """poke-env Player that drives decisions through Model1 (PPO)."""
+
+    def __init__(self, model: Model1, **kwargs):
+        super().__init__(**kwargs)
+        self.model = model
+        self._prev_opp_hp: dict[str, float] = {}  # battle_tag → avg opp HP last seen
+        self.wins   = 0
+        self.losses = 0
+
+    def choose_move(self, battle):
+        # ── Per-turn shaping: reward for HP damage dealt last turn ────────────
+        avg_opp_hp = sum(
+            p.current_hp_fraction for p in battle.opponent_team.values()
+        ) / max(1, len(battle.opponent_team))
+
+        tag = battle.battle_tag
+        prev = self._prev_opp_hp.get(tag, avg_opp_hp)
+        turn_reward = (prev - avg_opp_hp) * 0.5   # > 0 when we damage the enemy
+        self._prev_opp_hp[tag] = avg_opp_hp
+
+        if battle.turn > 1:
+            self.model.step_reward(turn_reward, done=False)
+
+        # ── PPO action ────────────────────────────────────────────────────────
+        choice = self.model.predict_rl(battle, store=True)
+        if choice is not None:
+            return self.create_order(choice)
+        return self.choose_random_move(battle)
+
+    def register_result(self, battle) -> None:
+        """Call after a battle finishes to store the terminal reward."""
+        won = battle.won is True
+        if won:
+            self.wins += 1
+        else:
+            self.losses += 1
+
+        terminal_r = (1.0 if won else -1.0) + _battle_reward(battle)
+        self.model.finish_episode(won=won)
+        # Replace the last buffered reward with the shaped terminal reward
+        if self.model.buffer.rewards:
+            self.model.buffer.rewards[-1] = terminal_r
+
+        self._prev_opp_hp.pop(battle.battle_tag, None)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Training loop
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def train(
+    n_battles: int     = 500,
+    update_every: int  = 10,
+    lr: float          = 3e-4,
+    gamma: float       = 0.99,
+    battle_format: str = "gen1randombattle",
+):
+    model = Model1(lr=lr, gamma=gamma)
+
+    if os.path.exists(model.CHECKPOINT):
+        model.load()
+
+    ppo_player = PPOPlayer(
+        model=model,
+        account_configuration=AccountConfiguration("PPO_Trainer", None),
+        battle_format=battle_format,
+    )
+    rand_player = RandomPlayer(
+        account_configuration=AccountConfiguration("Rand_Opponent", None),
+        battle_format=battle_format,
+    )
+
+    print(f"\n{'='*60}")
+    print(f"  PPO Training  |  {n_battles} battles  |  update every {update_every}")
+    print(f"{'='*60}\n")
+
+    completed  = 0
+    batch_num  = 0
+    n_batches  = (n_battles + update_every - 1) // update_every
+
+    # ── Metric history (one entry per batch) ─────────────────────────────────
+    history: dict[str, list] = {
+        "episode":     [],
+        "win_rate":    [],
+        "policy_loss": [],
+        "value_loss":  [],
+        "entropy":     [],
+    }
+
+    while completed < n_battles:
+        batch_size = min(update_every, n_battles - completed)
+        batch_num += 1
+
+        # ── Run a full batch of battles in one shot ──────────────────────────
+        # battle_against issues challenges and waits for ALL of them to finish
+        # before returning – no challenge-overlap issues.
+        await ppo_player.battle_against(rand_player, n_battles=batch_size)
+
+        # ── Collect terminal rewards for every battle in this batch ──────────
+        for battle in ppo_player.battles.values():
+            if battle.finished and battle.battle_tag not in getattr(ppo_player, "_processed", set()):
+                ppo_player.register_result(battle)
+                if not hasattr(ppo_player, "_processed"):
+                    ppo_player._processed = set()
+                ppo_player._processed.add(battle.battle_tag)
+
+        completed += batch_size
+
+        # ── PPO update ───────────────────────────────────────────────────────
+        metrics = model.update()
+        model.save()
+
+        total = ppo_player.wins + ppo_player.losses
+        win_rate = ppo_player.wins / total if total > 0 else 0.0
+        pol_loss = metrics.get("policy_loss", float("nan"))
+        val_loss = metrics.get("value_loss",  float("nan"))
+        entropy  = metrics.get("entropy",      float("nan"))
+
+        # record for plot
+        history["episode"].append(completed)
+        history["win_rate"].append(win_rate * 100)
+        history["policy_loss"].append(pol_loss)
+        history["value_loss"].append(val_loss)
+        history["entropy"].append(entropy)
+
+        print(
+            f"[batch {batch_num:>3}/{n_batches}  ep {completed:>5}/{n_battles}]  "
+            f"win%={win_rate*100:.1f}  "
+            f"pol_loss={pol_loss:.4f}  val_loss={val_loss:.4f}  entropy={entropy:.4f}"
+        )
+
+        # update the plot every time the checkpoint is saved
+        plot_training(history, model.CHECKPOINT)
+
+    print(f"\n{'='*60}")
+    total = ppo_player.wins + ppo_player.losses
+    print(f"  Training complete!  Final win rate: {ppo_player.wins}/{total} = {ppo_player.wins/total*100:.1f}%")
+    print(f"  Checkpoint: {model.CHECKPOINT}")
+    print(f"{'='*60}\n")
+
+
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Plot helper
+# ──────────────────────────────────────────────────────────────────────────────
+
+def plot_training(history: dict, checkpoint_path: str) -> None:
+    """Save a 2×2 training dashboard to the checkpoints directory."""
+    eps       = history["episode"]
+    win_rate  = history["win_rate"]
+    pol_loss  = history["policy_loss"]
+    val_loss  = history["value_loss"]
+    entropy   = history["entropy"]
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    fig.patch.set_facecolor("#0f0f1a")
+    fig.suptitle("PPO Training Dashboard", fontsize=16, fontweight="bold",
+                 color="white", y=0.98)
+
+    _PANEL_BG   = "#1a1a2e"
+    _GRID_COLOR = "#2a2a4a"
+    _TEXT_COLOR = "#c8c8e8"
+
+    panel_cfg = [
+        (axes[0, 0], win_rate,  "Win Rate (%)",    "#4ade80", (0, 100)),
+        (axes[0, 1], pol_loss,  "Policy Loss",     "#f97316", None),
+        (axes[1, 0], val_loss,  "Value Loss",      "#38bdf8", None),
+        (axes[1, 1], entropy,   "Entropy",         "#a78bfa", None),
+    ]
+
+    for ax, data, title, color, ylim in panel_cfg:
+        ax.set_facecolor(_PANEL_BG)
+        ax.plot(eps, data, color=color, linewidth=1.8, alpha=0.9, zorder=3)
+
+        # smoothed trend (window = 10% of data)
+        w = max(3, len(data) // 10)
+        if len(data) >= w:
+            import numpy as np
+            kernel  = np.ones(w) / w
+            smoothed = np.convolve(data, kernel, mode="valid")
+            valid_eps = eps[w - 1:]
+            ax.plot(valid_eps, smoothed, color="white", linewidth=2.5,
+                    alpha=0.6, linestyle="--", zorder=4, label="Moving avg")
+
+        ax.set_title(title, color=_TEXT_COLOR, fontsize=11, fontweight="bold", pad=8)
+        ax.set_xlabel("Episode", color=_TEXT_COLOR, fontsize=9)
+        ax.tick_params(colors=_TEXT_COLOR, labelsize=8)
+        ax.spines[:].set_color(_GRID_COLOR)
+        ax.grid(True, color=_GRID_COLOR, linewidth=0.6, zorder=0)
+        if ylim:
+            ax.set_ylim(*ylim)
+        for spine in ax.spines.values():
+            spine.set_linewidth(0.8)
+
+        # fill under the curve
+        ax.fill_between(eps, data, alpha=0.15, color=color, zorder=2)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+
+    out_dir  = os.path.dirname(checkpoint_path)
+    plot_path = os.path.join(out_dir, "training_plot.png")
+    os.makedirs(out_dir, exist_ok=True)
+    plt.savefig(plot_path, dpi=150, bbox_inches="tight",
+                facecolor=fig.get_facecolor())
+    plt.close(fig)
+    print(f"[Plot] Saved → {plot_path}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Entry point  –  reads from train_config.py in the project root
+# ──────────────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    # train_config.py lives one level above src/
+    _config_path = os.path.join(os.path.dirname(__file__), "..", "train_config.py")
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location("train_config", _config_path)
+    cfg   = _ilu.module_from_spec(_spec)  # type: ignore
+    _spec.loader.exec_module(cfg)         # type: ignore
+
+    print(f"Config loaded from: {os.path.normpath(_config_path)}")
+    print(f"  battles={cfg.N_BATTLES}  update_every={cfg.UPDATE_EVERY}  "
+          f"lr={cfg.LR}  gamma={cfg.GAMMA}  format={cfg.BATTLE_FORMAT}\n")
+
+    asyncio.run(train(
+        n_battles=cfg.N_BATTLES,
+        update_every=cfg.UPDATE_EVERY,
+        lr=cfg.LR,
+        gamma=cfg.GAMMA,
+        battle_format=cfg.BATTLE_FORMAT,
+    ))

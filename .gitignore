@@ -3,3 +3,5 @@ pokemon-showdown/
 .env
 .venv
 __pycache__/
+checkpoints/
+pokemon_env
