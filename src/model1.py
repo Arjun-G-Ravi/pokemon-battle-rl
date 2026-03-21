@@ -451,23 +451,26 @@ class Model1:
 
     def __init__(
         self,
-        lr: float          = 3e-4,
-        gamma: float       = 0.99,
-        gae_lambda: float  = 0.95,
-        clip_eps: float    = 0.2,
-        vf_coef: float     = 0.5,
-        ent_coef: float    = 0.01,
-        n_epochs: int      = 4,
-        mini_batch: int    = 64,
-        device: str        = "cpu",
+        lr: float           = 3e-4,
+        gamma: float        = 0.99,
+        gae_lambda: float   = 0.95,
+        clip_eps: float     = 0.2,
+        vf_coef: float      = 0.5,
+        ent_coef: float     = 0.01,
+        n_epochs: int       = 4,
+        mini_batch: int     = 64,
+        max_grad_norm: float = 0.5,
+        hidden_size: int    = 256,
+        device: str         = "cpu",
     ):
         self.device = torch.device(device)
-        self.net    = ActorCritic().to(self.device)
+        self.net    = ActorCritic(hidden=hidden_size).to(self.device)
         self.trainer = PPOTrainer(
             self.net,
             lr=lr, gamma=gamma, gae_lambda=gae_lambda,
             clip_eps=clip_eps, vf_coef=vf_coef, ent_coef=ent_coef,
             n_epochs=n_epochs, mini_batch=mini_batch,
+            max_grad_norm=max_grad_norm,
             device=device,
         )
         self.buffer = RolloutBuffer()

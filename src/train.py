@@ -180,14 +180,29 @@ class PPOPlayer(Player):
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def train(
-    n_battles: int     = 500,
-    update_every: int  = 10,
-    lr: float          = 3e-4,
-    gamma: float       = 0.99,
-    battle_format: str = "gen1randombattle",
-    opponent: str      = "random",
+    n_battles: int      = 500,
+    update_every: int   = 10,
+    lr: float           = 3e-4,
+    gamma: float        = 0.99,
+    gae_lambda: float   = 0.95,
+    clip_eps: float     = 0.2,
+    vf_coef: float      = 0.5,
+    ent_coef: float     = 0.01,
+    n_epochs: int       = 4,
+    mini_batch: int     = 64,
+    max_grad_norm: float = 0.5,
+    hidden_size: int    = 256,
+    device: str         = "cpu",
+    battle_format: str  = "gen1randombattle",
+    opponent: str       = "random",
 ):
-    model = Model1(lr=lr, gamma=gamma)
+    model = Model1(
+        lr=lr, gamma=gamma, gae_lambda=gae_lambda,
+        clip_eps=clip_eps, vf_coef=vf_coef, ent_coef=ent_coef,
+        n_epochs=n_epochs, mini_batch=mini_batch,
+        max_grad_norm=max_grad_norm, hidden_size=hidden_size,
+        device=device,
+    )
 
     if os.path.exists(model.CHECKPOINT):
         model.load()
@@ -348,15 +363,29 @@ if __name__ == "__main__":
     _spec.loader.exec_module(cfg)         # type: ignore
 
     print(f"Config loaded from: {os.path.normpath(_config_path)}")
-    print(f"  battles={cfg.N_BATTLES}  update_every={cfg.UPDATE_EVERY}  "
-          f"lr={cfg.LR}  gamma={cfg.GAMMA}  format={cfg.BATTLE_FORMAT}  "
-          f"opponent={cfg.OPPONENT}\n")
+    print(
+        f"  battles={cfg.N_BATTLES}  update_every={cfg.UPDATE_EVERY}  "
+        f"format={cfg.BATTLE_FORMAT}  opponent={cfg.OPPONENT}\n"
+        f"  lr={cfg.LR}  gamma={cfg.GAMMA}  gae_lambda={cfg.GAE_LAMBDA}  "
+        f"clip_eps={cfg.CLIP_EPS}  vf_coef={cfg.VF_COEF}  ent_coef={cfg.ENT_COEF}\n"
+        f"  n_epochs={cfg.N_EPOCHS}  mini_batch={cfg.MINI_BATCH}  "
+        f"max_grad_norm={cfg.MAX_GRAD_NORM}  hidden={cfg.HIDDEN_SIZE}  device={cfg.DEVICE}\n"
+    )
 
     asyncio.run(train(
         n_battles=cfg.N_BATTLES,
         update_every=cfg.UPDATE_EVERY,
         lr=cfg.LR,
         gamma=cfg.GAMMA,
+        gae_lambda=cfg.GAE_LAMBDA,
+        clip_eps=cfg.CLIP_EPS,
+        vf_coef=cfg.VF_COEF,
+        ent_coef=cfg.ENT_COEF,
+        n_epochs=cfg.N_EPOCHS,
+        mini_batch=cfg.MINI_BATCH,
+        max_grad_norm=cfg.MAX_GRAD_NORM,
+        hidden_size=cfg.HIDDEN_SIZE,
+        device=cfg.DEVICE,
         battle_format=cfg.BATTLE_FORMAT,
         opponent=cfg.OPPONENT,
     ))
