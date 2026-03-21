@@ -14,6 +14,7 @@ Make sure the Pokemon Showdown server is running first:
 import asyncio
 import os
 import sys
+import uuid
 from datetime import datetime
 import matplotlib
 matplotlib.use("Agg")   # headless – no display needed
@@ -95,9 +96,10 @@ def _make_opponent(entry: str, battle_format: str) -> Player:
         )
 
     print(f"  [Opponent pool] {label}")
+    rand_id = uuid.uuid4().hex[:6]
     return OpponentPlayer(
         model=model,
-        account_configuration=AccountConfiguration("Opp_Player", None),
+        account_configuration=AccountConfiguration(f"Opp_{rand_id}", None),
         battle_format=battle_format,
     )
 
@@ -112,7 +114,22 @@ def _build_opponent_pool(
     """
     if isinstance(opponents, str):
         opponents = [opponents]
-    return [_make_opponent(entry, battle_format) for entry in opponents]
+        
+    pool = []
+    for entry in opponents:
+        try:
+            pool.append(_make_opponent(entry, battle_format))
+        except RuntimeError as e:
+            if "size mismatch" in str(e):
+                print(f"  [Warning] Skipping '{entry}' because it was trained on an older observation size and is incompatible.")
+            else:
+                raise e
+                
+    if not pool:
+        print("  [Error] No valid opponents could be loaded! Falling back to RandomModel.")
+        pool.append(_make_opponent("random", battle_format))
+        
+    return pool
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Reward shaping
@@ -295,12 +312,18 @@ async def train(
         await ppo_player.battle_against(opp_player, n_battles=batch_size)
 
         # ── Collect terminal rewards for every battle in this batch ──────────
-        for battle in ppo_player.battles.values():
-            if battle.finished and battle.battle_tag not in getattr(ppo_player, "_processed", set()):
-                ppo_player.register_result(battle)
-                if not hasattr(ppo_player, "_processed"):
-                    ppo_player._processed = set()
-                ppo_player._processed.add(battle.battle_tag)
+        # Copy items to a list so we can safely delete from the dicts
+        for tag, battle in list(ppo_player.battles.items()):
+            if battle.finished:
+                if tag not in getattr(ppo_player, "_processed", set()):
+                    ppo_player.register_result(battle)
+                    if not hasattr(ppo_player, "_processed"):
+                        ppo_player._processed = set()
+                    ppo_player._processed.add(tag)
+                    
+                # Free memory: remove finished battles from player dicts
+                ppo_player._battles.pop(tag, None)
+                opp_player._battles.pop(tag, None)
 
         completed += batch_size
 

@@ -23,18 +23,21 @@ BATTLE_FORMAT = "gen1randombattle"
 OPPONENT = [
     # "random",
     # "strongest_move",
-    "checkpoints/model6.pt",
+    # "checkpoints/model4.pt",
+    # "checkpoints/model5.pt",
+    "checkpoints/model7.pt",
+    "checkpoints/model8.pt",
 ]
 
 # ── Output ────────────────────────────────────────────────────────────────────
 
 # Filename (without extension) for the saved checkpoint inside checkpoints/
-SAVE_NAME = "model7"
+SAVE_NAME = "model9"
 
 # ── PPO hyperparameters ───────────────────────────────────────────────────────
 
 # Adam learning rate
-LR = 3e-4
+LR = 3e-6
 
 # Discount factor for future rewards
 GAMMA = 0.99
