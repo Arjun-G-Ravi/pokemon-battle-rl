@@ -47,9 +47,6 @@ MAX_MOVES = 4
 _HERE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(_HERE, "..", "pokemon_database.csv")
 
-# ──────────────────────────────────────────────────────────────────────────────
-#  Pokemon database loader
-# ──────────────────────────────────────────────────────────────────────────────
 
 def _load_pokemon_db(path: str) -> dict:
     """Load pokemon_database.csv and return a name→stats dict.
@@ -547,7 +544,7 @@ class Model1:
         path = path or self.CHECKPOINT
         os.makedirs(os.path.dirname(path), exist_ok=True)
         torch.save({"net": self.net.state_dict()}, path)
-        print(f"[Model1] Saved checkpoint → {path}")
+        pass  # checkpoint saved silently
 
     def load(self, path: str | None = None) -> None:
         path = path or self.CHECKPOINT

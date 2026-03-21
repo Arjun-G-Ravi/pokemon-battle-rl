@@ -14,7 +14,7 @@ Make sure the Pokemon Showdown server is running first:
 import asyncio
 import os
 import sys
-
+from datetime import datetime
 import matplotlib
 matplotlib.use("Agg")   # headless – no display needed
 import matplotlib.pyplot as plt
@@ -32,6 +32,8 @@ from model2 import Model2
 # ──────────────────────────────────────────────────────────────────────────────
 #  Opponent model → poke-env Player wrapper
 # ──────────────────────────────────────────────────────────────────────────────
+
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 class OpponentPlayer(Player):
     """Wraps any model with a .predict(battle) interface into a poke-env Player."""
@@ -75,11 +77,54 @@ def _make_opponent(name: str, battle_format: str) -> Player:
 #  Reward shaping
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _battle_reward(battle) -> float:
-    """Bonus reward based on HP difference at end of battle, range [-1, 1]."""
-    my_hp  = sum(p.current_hp_fraction for p in battle.team.values())
-    opp_hp = sum(p.current_hp_fraction for p in battle.opponent_team.values())
-    return (my_hp - opp_hp) / 6.0
+_DAMAGING_STATUSES = {"brn", "par", "psn", "tox"}
+_SLEEP_STATUS      = {"slp"}
+
+
+class BattleSnapshot:
+    """Lightweight snapshot of trackable per-turn battle state."""
+    __slots__ = ("opp_fainted", "my_fainted", "opp_hp_fracs", "opp_statuses")
+
+    def __init__(self, battle):
+        self.opp_fainted  = sum(1 for p in battle.opponent_team.values() if p.fainted)
+        self.my_fainted   = sum(1 for p in battle.team.values() if p.fainted)
+        self.opp_hp_fracs = {
+            ident: p.current_hp_fraction
+            for ident, p in battle.opponent_team.items()
+        }
+        self.opp_statuses = {
+            ident: (p.status.name.lower() if p.status else None)
+            for ident, p in battle.opponent_team.items()
+        }
+
+
+def _turn_reward(prev: BattleSnapshot, curr: BattleSnapshot) -> float:
+    """Shaped per-turn reward:
+      +1.0   opponent pokemon fainted
+      -0.5   my pokemon fainted
+      +0.1   dealt > 50% HP to any opponent pokemon this turn
+      +0.2   inflicted sleep on opponent
+      +0.05  inflicted burn / paralysis / poison on opponent
+    """
+    r = 0.0
+
+    r += (curr.opp_fainted - prev.opp_fainted) * 1.0
+    r -= (curr.my_fainted  - prev.my_fainted)  * 0.5
+
+    for ident, prev_hp in prev.opp_hp_fracs.items():
+        curr_hp = curr.opp_hp_fracs.get(ident, prev_hp)
+        if (prev_hp - curr_hp) > 0.5:
+            r += 0.1
+
+        prev_status = prev.opp_statuses.get(ident)
+        curr_status = curr.opp_statuses.get(ident)
+        if prev_status is None and curr_status is not None:
+            if curr_status in _SLEEP_STATUS:
+                r += 0.2
+            elif curr_status in _DAMAGING_STATUSES:
+                r += 0.05
+
+    return r
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -92,45 +137,42 @@ class PPOPlayer(Player):
     def __init__(self, model: Model1, **kwargs):
         super().__init__(**kwargs)
         self.model = model
-        self._prev_opp_hp: dict[str, float] = {}  # battle_tag → avg opp HP last seen
+        self._prev_snap: dict[str, BattleSnapshot] = {}
         self.wins   = 0
         self.losses = 0
 
     def choose_move(self, battle):
-        # ── Per-turn shaping: reward for HP damage dealt last turn ────────────
-        avg_opp_hp = sum(
-            p.current_hp_fraction for p in battle.opponent_team.values()
-        ) / max(1, len(battle.opponent_team))
+        tag  = battle.battle_tag
+        curr = BattleSnapshot(battle)
 
-        tag = battle.battle_tag
-        prev = self._prev_opp_hp.get(tag, avg_opp_hp)
-        turn_reward = (prev - avg_opp_hp) * 0.5   # > 0 when we damage the enemy
-        self._prev_opp_hp[tag] = avg_opp_hp
+        if battle.turn > 1 and tag in self._prev_snap:
+            r = _turn_reward(self._prev_snap[tag], curr)
+            self.model.step_reward(r, done=False)
 
-        if battle.turn > 1:
-            self.model.step_reward(turn_reward, done=False)
+        self._prev_snap[tag] = curr
 
-        # ── PPO action ────────────────────────────────────────────────────────
         choice = self.model.predict_rl(battle, store=True)
         if choice is not None:
             return self.create_order(choice)
         return self.choose_random_move(battle)
 
     def register_result(self, battle) -> None:
-        """Call after a battle finishes to store the terminal reward."""
+        """Apply terminal reward: +10 win / -10 loss + surviving HP advantage."""
         won = battle.won is True
         if won:
             self.wins += 1
         else:
             self.losses += 1
 
-        terminal_r = (1.0 if won else -1.0) + _battle_reward(battle)
+        my_hp  = sum(p.current_hp_fraction for p in battle.team.values())
+        opp_hp = sum(p.current_hp_fraction for p in battle.opponent_team.values())
+        terminal_r = (10.0 if won else -10.0) + (my_hp - opp_hp)
+
         self.model.finish_episode(won=won)
-        # Replace the last buffered reward with the shaped terminal reward
         if self.model.buffer.rewards:
             self.model.buffer.rewards[-1] = terminal_r
 
-        self._prev_opp_hp.pop(battle.battle_tag, None)
+        self._prev_snap.pop(battle.battle_tag, None)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -284,14 +326,13 @@ def plot_training(history: dict, checkpoint_path: str) -> None:
         ax.fill_between(eps, data, alpha=0.15, color=color, zorder=2)
 
     plt.tight_layout(rect=[0, 0, 1, 0.96])
-
     out_dir  = os.path.dirname(checkpoint_path)
-    plot_path = os.path.join(out_dir, "training_plot.png")
+    plot_path = os.path.join(out_dir, f"training_plot_{timestamp}.png")
     os.makedirs(out_dir, exist_ok=True)
     plt.savefig(plot_path, dpi=150, bbox_inches="tight",
                 facecolor=fig.get_facecolor())
     plt.close(fig)
-    print(f"[Plot] Saved → {plot_path}")
+    # print(f"[Plot] Updated → {plot_path}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

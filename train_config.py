@@ -23,4 +23,4 @@ BATTLE_FORMAT = "gen1randombattle"
 #   "random"          →  RandomModel   (uniformly random moves)
 #   "strongest_move"  →  StrongestMoveModel  (greedy highest base-power)
 #   "model2"          →  Model2  (pre-trained PPO from random_battle_trained_model.pt)
-OPPONENT = "model2"
+OPPONENT = "random"
