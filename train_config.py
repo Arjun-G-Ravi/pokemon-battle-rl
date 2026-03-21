@@ -14,11 +14,22 @@ UPDATE_EVERY = 50
 # e.g. "gen1randombattle", "gen2randombattle", "gen3randombattle"
 BATTLE_FORMAT = "gen1randombattle"
 
-# Opponent to train against. Options:
+# Opponents to train against. Can be a list of any combination of:
 #   "random"          →  RandomModel   (uniformly random moves)
 #   "strongest_move"  →  StrongestMoveModel  (greedy highest base-power)
 #   "model2"          →  Model2  (pre-trained PPO from random_battle_trained_model.pt)
-OPPONENT = "random"
+#   "path/to/file.pt" →  Any .pt checkpoint file (loaded as a Model1 PPO bot)
+# If multiple entries are given, one is picked uniformly at random each batch.
+OPPONENT = [
+    # "random",
+    # "strongest_move",
+    "checkpoints/model4.pt",
+]
+
+# ── Output ────────────────────────────────────────────────────────────────────
+
+# Filename (without extension) for the saved checkpoint inside checkpoints/
+SAVE_NAME = "model5"
 
 # ── PPO hyperparameters ───────────────────────────────────────────────────────
 

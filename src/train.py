@@ -49,29 +49,70 @@ class OpponentPlayer(Player):
         return self.choose_random_move(battle)
 
 
-def _make_opponent(name: str, battle_format: str) -> Player:
-    """Instantiate the correct opponent Player from the config string."""
-    name = name.strip().lower()
-    if name == "random":
+def _make_opponent(entry: str, battle_format: str) -> Player:
+    """Instantiate one opponent Player.
+
+    `entry` can be:
+      - "random"          → RandomModel
+      - "strongest_move"  → StrongestMoveModel
+      - "model2"          → Model2 (fixed pretrained PPO)
+      - any path ending in .pt  → Model1 loaded from that checkpoint
+    """
+    key = entry.strip()
+
+    # Checkpoint path?
+    if key.endswith(".pt") or os.path.isfile(key):
+        ckpt_path = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), "..", key)
+            if not os.path.isabs(key) else key
+        )
+        m = Model1()
+        if os.path.exists(ckpt_path):
+            m.load(ckpt_path)
+            label = f"Model1 ← {ckpt_path}"
+        else:
+            label = f"Model1 (untrained, path not found: {ckpt_path})"
+
+        class _PPOInference:
+            """Thin wrapper that calls predict_rl in inference-only mode."""
+            def __init__(self, model): self._m = model
+            def predict(self, battle): return self._m.predict_rl(battle, store=False)
+
+        model = _PPOInference(m)
+    elif key.lower() == "random":
         model = RandomModel()
         label = "RandomModel"
-    elif name == "strongest_move":
+    elif key.lower() == "strongest_move":
         model = StrongestMoveModel()
         label = "StrongestMoveModel"
-    elif name == "model2":
+    elif key.lower() == "model2":
         model = Model2()
         label = "Model2 (pretrained PPO)"
     else:
         raise ValueError(
-            f"Unknown OPPONENT '{name}'. "
-            "Choose one of: 'random', 'strongest_move', 'model2'"
+            f"Unknown OPPONENT entry '{key}'. "
+            "Use 'random', 'strongest_move', 'model2', or a path to a .pt file."
         )
-    print(f"[Opponent] Using {label}")
+
+    print(f"  [Opponent pool] {label}")
     return OpponentPlayer(
         model=model,
         account_configuration=AccountConfiguration("Opp_Player", None),
         battle_format=battle_format,
     )
+
+
+def _build_opponent_pool(
+    opponents: list | str,
+    battle_format: str,
+) -> list:
+    """Build a list of OpponentPlayers from the config OPPONENT value.
+
+    Accepts a single string or a list of strings/paths.
+    """
+    if isinstance(opponents, str):
+        opponents = [opponents]
+    return [_make_opponent(entry, battle_format) for entry in opponents]
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Reward shaping
@@ -180,22 +221,30 @@ class PPOPlayer(Player):
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def train(
-    n_battles: int      = 500,
-    update_every: int   = 10,
-    lr: float           = 3e-4,
-    gamma: float        = 0.99,
-    gae_lambda: float   = 0.95,
-    clip_eps: float     = 0.2,
-    vf_coef: float      = 0.5,
-    ent_coef: float     = 0.01,
-    n_epochs: int       = 4,
-    mini_batch: int     = 64,
+    n_battles: int       = 500,
+    update_every: int    = 10,
+    lr: float            = 3e-4,
+    gamma: float         = 0.99,
+    gae_lambda: float    = 0.95,
+    clip_eps: float      = 0.2,
+    vf_coef: float       = 0.5,
+    ent_coef: float      = 0.01,
+    n_epochs: int        = 4,
+    mini_batch: int      = 64,
     max_grad_norm: float = 0.5,
-    hidden_size: int    = 256,
-    device: str         = "cpu",
-    battle_format: str  = "gen1randombattle",
-    opponent: str       = "random",
+    hidden_size: int     = 256,
+    device: str          = "cpu",
+    battle_format: str   = "gen1randombattle",
+    opponents: list      = None,
+    save_name: str       = "model1_ppo",
 ):
+    if opponents is None:
+        opponents = ["random"]
+
+    # Derive checkpoint path from save_name
+    _ckpt_dir  = os.path.join(os.path.dirname(__file__), "..", "checkpoints")
+    _ckpt_path = os.path.normpath(os.path.join(_ckpt_dir, f"{save_name}.pt"))
+
     model = Model1(
         lr=lr, gamma=gamma, gae_lambda=gae_lambda,
         clip_eps=clip_eps, vf_coef=vf_coef, ent_coef=ent_coef,
@@ -203,19 +252,22 @@ async def train(
         max_grad_norm=max_grad_norm, hidden_size=hidden_size,
         device=device,
     )
+    # Override the default checkpoint path with the configured save name
+    model.CHECKPOINT = _ckpt_path
 
-    if os.path.exists(model.CHECKPOINT):
-        model.load()
+    if os.path.exists(_ckpt_path):
+        model.load(_ckpt_path)
 
     ppo_player = PPOPlayer(
         model=model,
         account_configuration=AccountConfiguration("PPO_Trainer", None),
         battle_format=battle_format,
     )
-    opp_player = _make_opponent(opponent, battle_format)
 
     print(f"\n{'='*60}")
     print(f"  PPO Training  |  {n_battles} battles  |  update every {update_every}")
+    print(f"  Checkpoint   →  {_ckpt_path}")
+    opp_pool = _build_opponent_pool(opponents, battle_format)
     print(f"{'='*60}\n")
 
     completed  = 0
@@ -235,9 +287,11 @@ async def train(
         batch_size = min(update_every, n_battles - completed)
         batch_num += 1
 
-        # ── Run a full batch of battles in one shot ──────────────────────────
-        # battle_against issues challenges and waits for ALL of them to finish
-        # before returning – no challenge-overlap issues.
+        # Pick a random opponent from the pool each batch
+        import random as _rnd
+        opp_player = _rnd.choice(opp_pool)
+
+        # Run the full batch in one shot
         await ppo_player.battle_against(opp_player, n_battles=batch_size)
 
         # ── Collect terminal rewards for every battle in this batch ──────────
@@ -365,7 +419,8 @@ if __name__ == "__main__":
     print(f"Config loaded from: {os.path.normpath(_config_path)}")
     print(
         f"  battles={cfg.N_BATTLES}  update_every={cfg.UPDATE_EVERY}  "
-        f"format={cfg.BATTLE_FORMAT}  opponent={cfg.OPPONENT}\n"
+        f"format={cfg.BATTLE_FORMAT}  save_name={cfg.SAVE_NAME}\n"
+        f"  opponents={cfg.OPPONENT}\n"
         f"  lr={cfg.LR}  gamma={cfg.GAMMA}  gae_lambda={cfg.GAE_LAMBDA}  "
         f"clip_eps={cfg.CLIP_EPS}  vf_coef={cfg.VF_COEF}  ent_coef={cfg.ENT_COEF}\n"
         f"  n_epochs={cfg.N_EPOCHS}  mini_batch={cfg.MINI_BATCH}  "
@@ -387,5 +442,6 @@ if __name__ == "__main__":
         hidden_size=cfg.HIDDEN_SIZE,
         device=cfg.DEVICE,
         battle_format=cfg.BATTLE_FORMAT,
-        opponent=cfg.OPPONENT,
+        opponents=cfg.OPPONENT,
+        save_name=cfg.SAVE_NAME,
     ))
