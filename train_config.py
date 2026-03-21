@@ -5,7 +5,7 @@
 # ── Battle setup ──────────────────────────────────────────────────────────────
 
 # Total number of battles to train for
-N_BATTLES = 5000
+N_BATTLES = 10000
 
 # Battles per PPO weight update (effective "batch size" in episodes)
 UPDATE_EVERY = 50
@@ -23,13 +23,13 @@ BATTLE_FORMAT = "gen1randombattle"
 OPPONENT = [
     # "random",
     # "strongest_move",
-    "checkpoints/model4.pt",
+    "checkpoints/model6.pt",
 ]
 
 # ── Output ────────────────────────────────────────────────────────────────────
 
 # Filename (without extension) for the saved checkpoint inside checkpoints/
-SAVE_NAME = "model5"
+SAVE_NAME = "model7"
 
 # ── PPO hyperparameters ───────────────────────────────────────────────────────
 

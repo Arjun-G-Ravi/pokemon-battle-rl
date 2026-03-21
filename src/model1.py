@@ -22,10 +22,12 @@ ALL_TYPES = [
 TYPE_TO_IDX = {t.lower(): i for i, t in enumerate(ALL_TYPES)}
 NUM_TYPES = len(ALL_TYPES)   # 18
 
-# Status conditions
-ALL_STATUSES = ["brn", "frz", "par", "psn", "tox", "slp"]
+# Status conditions  (+ "fnt" for fainted bench slots)
+ALL_STATUSES = ["brn", "frz", "par", "psn", "tox", "slp", "fnt"]
 STATUS_TO_IDX = {s: i for i, s in enumerate(ALL_STATUSES)}
-NUM_STATUSES = len(ALL_STATUSES)   # 6
+NUM_STATUSES = len(ALL_STATUSES)   # 7
+
+NUM_BENCH = 5   # slots for bench Pokémon (team size 6 minus the active one)
 
 # Boost stats tracked by poke-env  (atk, def, spa, spd, spe, accuracy, evasion)
 BOOST_KEYS = ["atk", "def", "spa", "spd", "spe", "accuracy", "evasion"]
@@ -114,14 +116,21 @@ def _type_one_hot(pokemon) -> np.ndarray:
             vec[NUM_TYPES + idx] = 1.0
     return vec   # shape: (36,)
 
-def _status_one_hot(pokemon) -> np.ndarray:
-    """6-dim one-hot for the primary status condition (all zeros = healthy)."""
-    vec = np.zeros(NUM_STATUSES, dtype=np.float32)
-    if pokemon.status is not None:
+def _status_one_hot(pokemon, include_fainted: bool = False) -> np.ndarray:
+    """One-hot for the primary status condition (all zeros = healthy).
+
+    If `include_fainted` is True the vector has 7 dims (6 conditions + fainted),
+    otherwise it has 6 dims.
+    """
+    n = NUM_STATUSES if include_fainted else NUM_STATUSES - 1
+    vec = np.zeros(n, dtype=np.float32)
+    if include_fainted and pokemon.fainted:
+        vec[STATUS_TO_IDX["fnt"]] = 1.0
+    elif pokemon.status is not None:
         idx = STATUS_TO_IDX.get(pokemon.status.name.lower(), -1)
-        if idx >= 0:
+        if 0 <= idx < n:
             vec[idx] = 1.0
-    return vec   # shape: (6,)
+    return vec
 
 def _boost_vec(pokemon) -> np.ndarray:
     """7-dim vector of stat boosts, each normalised to [-1, 1] (raw range is [-6,6])."""
@@ -139,10 +148,10 @@ def _pokemon_features(pokemon) -> np.ndarray:
     | stat boosts (7)  |  current HP fraction (1)
     Total = 6 + 6 + 36 + 7 + 1 = 56 dims
     """
-    stats  = lookup_stats(pokemon.species)           # (6,)
-    status = _status_one_hot(pokemon)                # (6,)
-    types  = _type_one_hot(pokemon)                  # (36,)
-    boosts = _boost_vec(pokemon)                     # (7,)
+    stats   = lookup_stats(pokemon.species)                              # (6,)
+    status  = _status_one_hot(pokemon, include_fainted=False)            # (6,)
+    types   = _type_one_hot(pokemon)                                     # (36,)
+    boosts  = _boost_vec(pokemon)                                        # (7,)
     hp_frac = np.array([float(pokemon.current_hp_fraction)], dtype=np.float32)  # (1,)
     return np.concatenate([stats, status, types, boosts, hp_frac])   # (56,)
 
@@ -179,11 +188,46 @@ def _move_features(move) -> np.ndarray:
     return np.concatenate([bp, type_vec, cat_vec])   # (22,)
 
 # Observation dimension breakdown:
-#   my pokemon features  : 56
-#   opp pokemon features : 56
-#   4 × move features    : 4 × 22 = 88
-# Total                  = 200
-OBS_DIM = 56 + 56 + MAX_MOVES * 22   # = 200
+#   my active pokemon features  : 56
+#   opp active pokemon features : 56
+#   4 × move features           : 4 × 22 = 88
+#   5 × bench slot features     : 5 × 50 = 250
+#     each bench slot: hp (1) + status+fainted (7) + type ×2 (36) + stats (6) = 50
+# Total                         = 56 + 56 + 88 + 250 = 450
+_BENCH_SLOT_DIM = 1 + NUM_STATUSES + NUM_TYPES * 2 + NUM_STATS   # 1+7+36+6 = 50
+OBS_DIM = 56 + 56 + MAX_MOVES * 22 + NUM_BENCH * _BENCH_SLOT_DIM   # = 450
+
+
+def _bench_features(pokemon) -> np.ndarray:
+    """Encode a single bench Pokémon into a 50-dim vector.
+
+    Layout:
+      HP fraction (1)  |  status + fainted one-hot (7)  |  type ×2 (36)  |  base stats (6)
+    Total = 50 dims
+    """
+    hp_frac = np.array([float(pokemon.current_hp_fraction)], dtype=np.float32)  # (1,)
+    status  = _status_one_hot(pokemon, include_fainted=True)                     # (7,)
+    types   = _type_one_hot(pokemon)                                             # (36,)
+    stats   = lookup_stats(pokemon.species)                                      # (6,)
+    return np.concatenate([hp_frac, status, types, stats])   # (50,)
+
+
+def _bench_vec(team: dict, active_pokemon) -> np.ndarray:
+    """Encode up to NUM_BENCH (5) bench Pokémon into a fixed-size vector.
+
+    Bench = team minus the currently active Pokémon, padded with zeros if fewer
+    than 5 bench slots are occupied.
+    """
+    bench = [
+        p for ident, p in team.items()
+        if p is not active_pokemon
+    ][:NUM_BENCH]
+
+    parts = [_bench_features(p) for p in bench]
+    while len(parts) < NUM_BENCH:
+        parts.append(np.zeros(_BENCH_SLOT_DIM, dtype=np.float32))
+
+    return np.concatenate(parts)   # (250,)
 
 
 def build_obs(battle) -> np.ndarray:
@@ -191,23 +235,25 @@ def build_obs(battle) -> np.ndarray:
     my  = battle.active_pokemon
     opp = battle.opponent_active_pokemon
 
-    my_vec  = _pokemon_features(my)
+    my_vec  = _pokemon_features(my)                    # (56,)
 
     if opp is not None:
-        opp_vec = _opp_features(opp)
+        opp_vec = _opp_features(opp)                   # (56,)
     else:
         opp_vec = np.zeros(56, dtype=np.float32)
 
-    # Pad / truncate available moves to exactly MAX_MOVES slots
+    # Moves: pad / truncate to exactly MAX_MOVES slots
     moves = battle.available_moves[:MAX_MOVES]
     move_parts = [_move_features(m) for m in moves]
     while len(move_parts) < MAX_MOVES:
         move_parts.append(np.zeros(22, dtype=np.float32))
+    move_vec = np.concatenate(move_parts)              # (88,)
 
-    move_vec = np.concatenate(move_parts)   # (88,)
+    # Bench Pokémon (our team minus the active one)
+    bench_vec = _bench_vec(battle.team, my)            # (250,)
 
-    obs = np.concatenate([my_vec, opp_vec, move_vec])
-    assert obs.shape == (OBS_DIM,), f"OBS_DIM mismatch: {obs.shape}"
+    obs = np.concatenate([my_vec, opp_vec, move_vec, bench_vec])
+    assert obs.shape == (OBS_DIM,), f"OBS_DIM mismatch: got {obs.shape[0]}, expected {OBS_DIM}"
     return obs.astype(np.float32)
 
 # ──────────────────────────────────────────────────────────────────────────────
